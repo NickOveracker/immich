@@ -26,13 +26,6 @@ const userColumns = [
   'users.profileChangedAt',
 ] as const;
 
-export enum AssetSyncResult {
-  DO_NOTHING,
-  UPDATE,
-  OFFLINE,
-  CHECK_OFFLINE,
-}
-
 const withOwner = (eb: ExpressionBuilder<DB, 'libraries'>) => {
   return jsonObjectFrom(eb.selectFrom('users').whereRef('users.id', '=', 'libraries.ownerId').select(userColumns)).as(
     'owner',
@@ -106,9 +99,6 @@ export class LibraryRepository {
     const stats = await this.db
       .selectFrom('libraries')
       .innerJoin('assets', 'assets.libraryId', 'libraries.id')
-      .where('assets.fileCreatedAt', 'is not', null)
-      .where('assets.fileModifiedAt', 'is not', null)
-      .where('assets.localDateTime', 'is not', null)
       .leftJoin('exif', 'exif.assetId', 'assets.id')
       .select((eb) =>
         eb.fn

@@ -184,9 +184,6 @@ export class MetadataService extends BaseService {
 
     const { width, height } = this.getImageDimensions(exifTags);
 
-    const fileCreatedAtDate = dateTimeOriginal;
-    const fileModifiedAtDate = modifyDate;
-
     const exifData: Insertable<Exif> = {
       assetId: asset.id,
 
@@ -240,8 +237,7 @@ export class MetadataService extends BaseService {
       id: asset.id,
       duration: exifTags.Duration?.toString() ?? null,
       localDateTime,
-      fileCreatedAt: fileCreatedAtDate,
-      fileModifiedAt: fileModifiedAtDate,
+      fileCreatedAt: exifData.dateTimeOriginal ?? undefined,
     });
 
     await this.assetRepository.upsertJobStatus({
@@ -605,19 +601,16 @@ export class MetadataService extends BaseService {
     if (timeZone) {
       this.logger.verbose(`Asset ${asset.id} timezone is ${timeZone} (via ${exifTags.tzSource})`);
     } else {
-      this.logger.verbose(`Asset ${asset.id} has no time zone information`);
+      this.logger.warn(`Asset ${asset.id} has no time zone information`);
     }
-
-    const fileCreatedAt = asset.fileCreatedAt;
-    const fileModifiedAt = asset.fileModifiedAt;
 
     let dateTimeOriginal = dateTime?.toDate();
     let localDateTime = dateTime?.toDateTime().setZone('UTC', { keepLocalTime: true }).toJSDate();
     if (!localDateTime || !dateTimeOriginal) {
-      const earliestDate = this.earliestDate(fileModifiedAt, fileCreatedAt);
       this.logger.debug(
-        `No valid date found in exif tags from asset ${asset.id}, falling back to earliest timestamp between file creation and file modification: ${earliestDate.toISOString()}`,
+        `No valid date found in exif tags from asset ${asset.id}, falling back to earliest timestamp between file creation and file modification`,
       );
+      const earliestDate = this.earliestDate(asset.fileModifiedAt, asset.fileCreatedAt);
       dateTimeOriginal = earliestDate;
       localDateTime = earliestDate;
     }
@@ -754,8 +747,6 @@ export class MetadataService extends BaseService {
 
     if (asset.isExternal) {
       if (sidecarPath !== asset.sidecarPath) {
-        this.logger.verbose(`External asset ${asset.id} has sidecar path ${sidecarPath}`);
-
         await this.assetRepository.update({ id: asset.id, sidecarPath });
       }
       return JobStatus.SUCCESS;

@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { ExpressionBuilder, Insertable, Kysely, sql } from 'kysely';
+import { ExpressionBuilder, Insertable, Kysely, Selectable, sql } from 'kysely';
 import { jsonObjectFrom } from 'kysely/helpers/postgres';
 import { InjectKysely } from 'nestjs-kysely';
 import { AssetFaces, DB, FaceSearch, Person } from 'src/db';
@@ -7,22 +7,52 @@ import { ChunkedArray, DummyValue, GenerateSql } from 'src/decorators';
 import { AssetFaceEntity } from 'src/entities/asset-face.entity';
 import { PersonEntity } from 'src/entities/person.entity';
 import { SourceType } from 'src/enum';
-import {
-  AssetFaceId,
-  DeleteFacesOptions,
-  IPersonRepository,
-  PeopleStatistics,
-  PersonNameResponse,
-  PersonNameSearchOptions,
-  PersonSearchOptions,
-  PersonStatistics,
-  SelectFaceOptions,
-  UnassignFacesOptions,
-  UpdateFacesData,
-} from 'src/interfaces/person.interface';
 import { mapUpsertColumns } from 'src/utils/database';
 import { Paginated, PaginationOptions } from 'src/utils/pagination';
 import { FindOptionsRelations } from 'typeorm';
+
+export interface PersonSearchOptions {
+  minimumFaceCount: number;
+  withHidden: boolean;
+  closestFaceAssetId?: string;
+}
+
+export interface PersonNameSearchOptions {
+  withHidden?: boolean;
+}
+
+export interface PersonNameResponse {
+  id: string;
+  name: string;
+}
+
+export interface AssetFaceId {
+  assetId: string;
+  personId: string;
+}
+
+export interface UpdateFacesData {
+  oldPersonId?: string;
+  faceIds?: string[];
+  newPersonId: string;
+}
+
+export interface PersonStatistics {
+  assets: number;
+}
+
+export interface PeopleStatistics {
+  total: number;
+  hidden: number;
+}
+
+export interface DeleteFacesOptions {
+  sourceType: SourceType;
+}
+
+export type UnassignFacesOptions = DeleteFacesOptions;
+
+export type SelectFaceOptions = (keyof Selectable<AssetFaces>)[];
 
 const withPerson = (eb: ExpressionBuilder<DB, 'asset_faces'>) => {
   return jsonObjectFrom(
@@ -43,7 +73,7 @@ const withFaceSearch = (eb: ExpressionBuilder<DB, 'asset_faces'>) => {
 };
 
 @Injectable()
-export class PersonRepository implements IPersonRepository {
+export class PersonRepository {
   constructor(@InjectKysely() private db: Kysely<DB>) {}
 
   @GenerateSql({ params: [{ oldPersonId: DummyValue.UUID, newPersonId: DummyValue.UUID }] })
@@ -100,7 +130,6 @@ export class PersonRepository implements IPersonRepository {
       .$if(!!options.personId, (qb) => qb.where('asset_faces.personId', '=', options.personId!))
       .$if(!!options.sourceType, (qb) => qb.where('asset_faces.sourceType', '=', options.sourceType!))
       .$if(!!options.assetId, (qb) => qb.where('asset_faces.assetId', '=', options.assetId!))
-      .$if(!!options.assetId, (qb) => qb.where('asset_faces.assetId', '=', options.assetId!))
       .stream() as AsyncIterableIterator<AssetFaceEntity>;
   }
 
@@ -109,7 +138,7 @@ export class PersonRepository implements IPersonRepository {
       .selectFrom('person')
       .selectAll('person')
       .$if(!!options.ownerId, (qb) => qb.where('person.ownerId', '=', options.ownerId!))
-      .$if(!!options.thumbnailPath, (qb) => qb.where('person.thumbnailPath', '=', options.thumbnailPath!))
+      .$if(options.thumbnailPath !== undefined, (qb) => qb.where('person.thumbnailPath', '=', options.thumbnailPath!))
       .$if(options.faceAssetId === null, (qb) => qb.where('person.faceAssetId', 'is', null))
       .$if(!!options.faceAssetId, (qb) => qb.where('person.faceAssetId', '=', options.faceAssetId!))
       .$if(options.isHidden !== undefined, (qb) => qb.where('person.isHidden', '=', options.isHidden!))
@@ -133,10 +162,7 @@ export class PersonRepository implements IPersonRepository {
       )
       .where('person.ownerId', '=', userId)
       .orderBy('person.isHidden', 'asc')
-      .orderBy(sql`NULLIF(person.name, '') is null`, 'asc')
-      .orderBy((eb) => eb.fn.count('asset_faces.assetId'), 'desc')
-      .orderBy(sql`NULLIF(person.name, '')`, sql`asc nulls last`)
-      .orderBy('person.createdAt')
+      .orderBy('person.isFavorite', 'desc')
       .having((eb) =>
         eb.or([
           eb('person.name', '!=', ''),
@@ -160,6 +186,13 @@ export class PersonRepository implements IPersonRepository {
                 .where('face_search.faceId', '=', options!.closestFaceAssetId!),
           ),
         ),
+      )
+      .$if(!options?.closestFaceAssetId, (qb) =>
+        qb
+          .orderBy(sql`NULLIF(person.name, '') is null`, 'asc')
+          .orderBy((eb) => eb.fn.count('asset_faces.assetId'), 'desc')
+          .orderBy(sql`NULLIF(person.name, '')`, sql`asc nulls last`)
+          .orderBy('person.createdAt'),
       )
       .$if(!options?.withHidden, (qb) => qb.where('person.isHidden', '=', false))
       .offset(pagination.skip ?? 0)
@@ -281,8 +314,7 @@ export class PersonRepository implements IPersonRepository {
           .onRef('assets.id', '=', 'asset_faces.assetId')
           .on('asset_faces.personId', '=', personId)
           .on('assets.isArchived', '=', false)
-          .on('assets.deletedAt', 'is', null)
-          .on('assets.livePhotoVideoId', 'is', null),
+          .on('assets.deletedAt', 'is', null),
       )
       .select((eb) => eb.fn.count(eb.fn('distinct', ['assets.id'])).as('count'))
       .executeTakeFirst();

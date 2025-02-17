@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { getName } from 'i18n-iso-countries';
 import { Expression, Kysely, sql, SqlBool } from 'kysely';
 import { InjectKysely } from 'nestjs-kysely';
@@ -8,19 +8,36 @@ import { readFile } from 'node:fs/promises';
 import readLine from 'node:readline';
 import { citiesFile } from 'src/constants';
 import { DB, GeodataPlaces, NaturalearthCountries } from 'src/db';
-import { AssetEntity, withExif } from 'src/entities/asset.entity';
+import { DummyValue, GenerateSql } from 'src/decorators';
 import { NaturalEarthCountriesTempEntity } from 'src/entities/natural-earth-countries.entity';
 import { LogLevel, SystemMetadataKey } from 'src/enum';
-import { ILoggerRepository } from 'src/interfaces/logger.interface';
-import {
-  GeoPoint,
-  IMapRepository,
-  MapMarker,
-  MapMarkerSearchOptions,
-  ReverseGeocodeResult,
-} from 'src/interfaces/map.interface';
-import { ISystemMetadataRepository } from 'src/interfaces/system-metadata.interface';
 import { ConfigRepository } from 'src/repositories/config.repository';
+import { LoggingRepository } from 'src/repositories/logging.repository';
+import { SystemMetadataRepository } from 'src/repositories/system-metadata.repository';
+
+export interface MapMarkerSearchOptions {
+  isArchived?: boolean;
+  isFavorite?: boolean;
+  fileCreatedBefore?: Date;
+  fileCreatedAfter?: Date;
+}
+
+export interface GeoPoint {
+  latitude: number;
+  longitude: number;
+}
+
+export interface ReverseGeocodeResult {
+  country: string | null;
+  state: string | null;
+  city: string | null;
+}
+
+export interface MapMarker extends ReverseGeocodeResult {
+  id: string;
+  lat: number;
+  lon: number;
+}
 
 interface MapDB extends DB {
   geodata_places_tmp: GeodataPlaces;
@@ -28,11 +45,11 @@ interface MapDB extends DB {
 }
 
 @Injectable()
-export class MapRepository implements IMapRepository {
+export class MapRepository {
   constructor(
     private configRepository: ConfigRepository,
-    @Inject(ISystemMetadataRepository) private metadataRepository: ISystemMetadataRepository,
-    @Inject(ILoggerRepository) private logger: ILoggerRepository,
+    private metadataRepository: SystemMetadataRepository,
+    private logger: LoggingRepository,
     @InjectKysely() private db: Kysely<MapDB>,
   ) {
     this.logger.setContext(MapRepository.name);
@@ -59,17 +76,19 @@ export class MapRepository implements IMapRepository {
     this.logger.log('Geodata import completed');
   }
 
-  async getMapMarkers(
-    ownerIds: string[],
-    albumIds: string[],
-    options: MapMarkerSearchOptions = {},
-  ): Promise<MapMarker[]> {
+  @GenerateSql({ params: [[DummyValue.UUID], []] })
+  getMapMarkers(ownerIds: string[], albumIds: string[], options: MapMarkerSearchOptions = {}) {
     const { isArchived, isFavorite, fileCreatedAfter, fileCreatedBefore } = options;
 
-    const assets = (await this.db
+    return this.db
       .selectFrom('assets')
-      .$call(withExif)
-      .select('id')
+      .innerJoin('exif', (builder) =>
+        builder
+          .onRef('assets.id', '=', 'exif.assetId')
+          .on('exif.latitude', 'is not', null)
+          .on('exif.longitude', 'is not', null),
+      )
+      .select(['id', 'exif.latitude as lat', 'exif.longitude as lon', 'exif.city', 'exif.state', 'exif.country'])
       .leftJoin('albums_assets_assets', (join) => join.onRef('assets.id', '=', 'albums_assets_assets.assetsId'))
       .where('isVisible', '=', true)
       .$if(isArchived !== undefined, (q) => q.where('isArchived', '=', isArchived!))
@@ -77,32 +96,21 @@ export class MapRepository implements IMapRepository {
       .$if(fileCreatedAfter !== undefined, (q) => q.where('fileCreatedAt', '>=', fileCreatedAfter!))
       .$if(fileCreatedBefore !== undefined, (q) => q.where('fileCreatedAt', '<=', fileCreatedBefore!))
       .where('deletedAt', 'is', null)
-      .where('exif.latitude', 'is not', null)
-      .where('exif.longitude', 'is not', null)
-      .where((eb) => {
-        const ors: Expression<SqlBool>[] = [];
+      .where((builder) => {
+        const expression: Expression<SqlBool>[] = [];
 
         if (ownerIds.length > 0) {
-          ors.push(eb('ownerId', 'in', ownerIds));
+          expression.push(builder('ownerId', 'in', ownerIds));
         }
 
         if (albumIds.length > 0) {
-          ors.push(eb('albums_assets_assets.albumsId', 'in', albumIds));
+          expression.push(builder('albums_assets_assets.albumsId', 'in', albumIds));
         }
 
-        return eb.or(ors);
+        return builder.or(expression);
       })
       .orderBy('fileCreatedAt', 'desc')
-      .execute()) as any as AssetEntity[];
-
-    return assets.map((asset) => ({
-      id: asset.id,
-      lat: asset.exifInfo!.latitude!,
-      lon: asset.exifInfo!.longitude!,
-      city: asset.exifInfo!.city,
-      state: asset.exifInfo!.state,
-      country: asset.exifInfo!.country,
-    }));
+      .execute() as Promise<MapMarker[]>;
   }
 
   async reverseGeocode(point: GeoPoint): Promise<ReverseGeocodeResult> {

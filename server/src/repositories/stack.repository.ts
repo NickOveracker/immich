@@ -5,14 +5,22 @@ import { InjectKysely } from 'nestjs-kysely';
 import { DB } from 'src/db';
 import { DummyValue, GenerateSql } from 'src/decorators';
 import { StackEntity } from 'src/entities/stack.entity';
-import { IStackRepository, StackSearch } from 'src/interfaces/stack.interface';
 import { asUuid } from 'src/utils/database';
+
+export interface StackSearch {
+  ownerId: string;
+  primaryAssetId?: string;
+}
 
 const withAssets = (eb: ExpressionBuilder<DB, 'asset_stack'>, withTags = false) => {
   return jsonArrayFrom(
     eb
       .selectFrom('assets')
-      .selectAll()
+      .selectAll('assets')
+      .innerJoinLateral(
+        (eb) => eb.selectFrom('exif').selectAll('exif').whereRef('exif.assetId', '=', 'assets.id').as('exifInfo'),
+        (join) => join.onTrue(),
+      )
       .$if(withTags, (eb) =>
         eb.select((eb) =>
           jsonArrayFrom(
@@ -24,13 +32,14 @@ const withAssets = (eb: ExpressionBuilder<DB, 'asset_stack'>, withTags = false) 
           ).as('tags'),
         ),
       )
+      .select((eb) => eb.fn.toJson('exifInfo').as('exifInfo'))
       .where('assets.deletedAt', 'is', null)
       .whereRef('assets.stackId', '=', 'asset_stack.id'),
   ).as('assets');
 };
 
 @Injectable()
-export class StackRepository implements IStackRepository {
+export class StackRepository {
   constructor(@InjectKysely() private db: Kysely<DB>) {}
 
   @GenerateSql({ params: [{ ownerId: DummyValue.UUID }] })

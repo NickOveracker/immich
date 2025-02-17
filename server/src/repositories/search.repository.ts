@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { Kysely, OrderByDirectionExpression, sql } from 'kysely';
 import { InjectKysely } from 'nestjs-kysely';
 import { randomUUID } from 'node:crypto';
@@ -6,28 +6,204 @@ import { DB } from 'src/db';
 import { DummyValue, GenerateSql } from 'src/decorators';
 import { AssetEntity, searchAssetBuilder } from 'src/entities/asset.entity';
 import { GeodataPlacesEntity } from 'src/entities/geodata-places.entity';
-import { AssetType } from 'src/enum';
-import { ILoggerRepository } from 'src/interfaces/logger.interface';
-import {
-  AssetDuplicateSearch,
-  AssetSearchOptions,
-  FaceEmbeddingSearch,
-  GetCameraMakesOptions,
-  GetCameraModelsOptions,
-  GetCitiesOptions,
-  GetStatesOptions,
-  ISearchRepository,
-  SearchPaginationOptions,
-  SmartSearchOptions,
-} from 'src/interfaces/search.interface';
+import { AssetStatus, AssetType } from 'src/enum';
+import { LoggingRepository } from 'src/repositories/logging.repository';
 import { anyUuid, asUuid } from 'src/utils/database';
 import { Paginated } from 'src/utils/pagination';
 import { isValidInteger } from 'src/validation';
 
+export interface SearchResult<T> {
+  /** total matches */
+  total: number;
+  /** collection size */
+  count: number;
+  /** current page */
+  page: number;
+  /** items for page */
+  items: T[];
+  /** score */
+  distances: number[];
+  facets: SearchFacet[];
+}
+
+export interface SearchFacet {
+  fieldName: string;
+  counts: Array<{
+    count: number;
+    value: string;
+  }>;
+}
+
+export type SearchExploreItemSet<T> = Array<{
+  value: string;
+  data: T;
+}>;
+
+export interface SearchExploreItem<T> {
+  fieldName: string;
+  items: SearchExploreItemSet<T>;
+}
+
+export interface SearchAssetIDOptions {
+  checksum?: Buffer;
+  deviceAssetId?: string;
+  id?: string;
+}
+
+export interface SearchUserIdOptions {
+  deviceId?: string;
+  libraryId?: string | null;
+  userIds?: string[];
+}
+
+export type SearchIdOptions = SearchAssetIDOptions & SearchUserIdOptions;
+
+export interface SearchStatusOptions {
+  isArchived?: boolean;
+  isEncoded?: boolean;
+  isFavorite?: boolean;
+  isMotion?: boolean;
+  isOffline?: boolean;
+  isVisible?: boolean;
+  isNotInAlbum?: boolean;
+  type?: AssetType;
+  status?: AssetStatus;
+  withArchived?: boolean;
+  withDeleted?: boolean;
+}
+
+export interface SearchOneToOneRelationOptions {
+  withExif?: boolean;
+  withStacked?: boolean;
+}
+
+export interface SearchRelationOptions extends SearchOneToOneRelationOptions {
+  withFaces?: boolean;
+  withPeople?: boolean;
+}
+
+export interface SearchDateOptions {
+  createdBefore?: Date;
+  createdAfter?: Date;
+  takenBefore?: Date;
+  takenAfter?: Date;
+  trashedBefore?: Date;
+  trashedAfter?: Date;
+  updatedBefore?: Date;
+  updatedAfter?: Date;
+}
+
+export interface SearchPathOptions {
+  encodedVideoPath?: string;
+  originalFileName?: string;
+  originalPath?: string;
+  previewPath?: string;
+  thumbnailPath?: string;
+}
+
+export interface SearchExifOptions {
+  city?: string | null;
+  country?: string | null;
+  lensModel?: string | null;
+  make?: string | null;
+  model?: string | null;
+  state?: string | null;
+  description?: string | null;
+}
+
+export interface SearchEmbeddingOptions {
+  embedding: string;
+  userIds: string[];
+}
+
+export interface SearchPeopleOptions {
+  personIds?: string[];
+}
+
+export interface SearchTagOptions {
+  tagIds?: string[];
+}
+
+export interface SearchOrderOptions {
+  orderDirection?: 'asc' | 'desc';
+}
+
+export interface SearchPaginationOptions {
+  page: number;
+  size: number;
+}
+
+type BaseAssetSearchOptions = SearchDateOptions &
+  SearchIdOptions &
+  SearchExifOptions &
+  SearchOrderOptions &
+  SearchPathOptions &
+  SearchStatusOptions &
+  SearchUserIdOptions &
+  SearchPeopleOptions &
+  SearchTagOptions;
+
+export type AssetSearchOptions = BaseAssetSearchOptions & SearchRelationOptions;
+
+export type AssetSearchOneToOneRelationOptions = BaseAssetSearchOptions & SearchOneToOneRelationOptions;
+
+export type AssetSearchBuilderOptions = Omit<AssetSearchOptions, 'orderDirection'>;
+
+export type SmartSearchOptions = SearchDateOptions &
+  SearchEmbeddingOptions &
+  SearchExifOptions &
+  SearchOneToOneRelationOptions &
+  SearchStatusOptions &
+  SearchUserIdOptions &
+  SearchPeopleOptions &
+  SearchTagOptions;
+
+export interface FaceEmbeddingSearch extends SearchEmbeddingOptions {
+  hasPerson?: boolean;
+  numResults: number;
+  maxDistance: number;
+}
+
+export interface AssetDuplicateSearch {
+  assetId: string;
+  embedding: string;
+  maxDistance: number;
+  type: AssetType;
+  userIds: string[];
+}
+
+export interface FaceSearchResult {
+  distance: number;
+  id: string;
+  personId: string | null;
+}
+
+export interface AssetDuplicateResult {
+  assetId: string;
+  duplicateId: string | null;
+  distance: number;
+}
+
+export interface GetStatesOptions {
+  country?: string;
+}
+
+export interface GetCitiesOptions extends GetStatesOptions {
+  state?: string;
+}
+
+export interface GetCameraModelsOptions {
+  make?: string;
+}
+
+export interface GetCameraMakesOptions {
+  model?: string;
+}
+
 @Injectable()
-export class SearchRepository implements ISearchRepository {
+export class SearchRepository {
   constructor(
-    @Inject(ILoggerRepository) private logger: ILoggerRepository,
+    private logger: LoggingRepository,
     @InjectKysely() private db: Kysely<DB>,
   ) {
     this.logger.setContext(SearchRepository.name);
@@ -69,12 +245,19 @@ export class SearchRepository implements ISearchRepository {
       },
     ],
   })
-  searchRandom(size: number, options: AssetSearchOptions): Promise<AssetEntity[]> {
+  async searchRandom(size: number, options: AssetSearchOptions): Promise<AssetEntity[]> {
     const uuid = randomUUID();
     const builder = searchAssetBuilder(this.db, options);
-    const lessThan = builder.where('assets.id', '<', uuid).orderBy('assets.id').limit(size);
-    const greaterThan = builder.where('assets.id', '>', uuid).orderBy('assets.id').limit(size);
-    return sql`${lessThan} union all ${greaterThan}`.execute(this.db) as any as Promise<AssetEntity[]>;
+    const lessThan = builder
+      .where('assets.id', '<', uuid)
+      .orderBy(sql`random()`)
+      .limit(size);
+    const greaterThan = builder
+      .where('assets.id', '>', uuid)
+      .orderBy(sql`random()`)
+      .limit(size);
+    const { rows } = await sql`${lessThan} union all ${greaterThan} limit ${size}`.execute(this.db);
+    return rows as any as AssetEntity[];
   }
 
   @GenerateSql({
@@ -291,7 +474,7 @@ export class SearchRepository implements ISearchRepository {
       await sql`truncate ${sql.table('smart_search')}`.execute(trx);
       await trx.schema
         .alterTable('smart_search')
-        .alterColumn('embedding', (col) => col.setDataType(sql.lit(`vector(${dimSize})`)))
+        .alterColumn('embedding', (col) => col.setDataType(sql.raw(`vector(${dimSize})`)))
         .execute();
       await sql`reindex index clip_index`.execute(trx);
     });
